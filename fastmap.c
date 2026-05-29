@@ -441,7 +441,11 @@ int main_fastmap(int argc, char *argv[])
 
 	fp = xzopen(argv[optind + 1], "r");
 	seq = kseq_init(fp);
-	if ((idx = bwa_idx_load(argv[optind], BWA_IDX_BWT|BWA_IDX_BNS)) == 0) return 1;
+	idx = bwa_idx_load_from_shm(argv[optind]);
+	if (idx == 0) {
+		if ((idx = bwa_idx_load(argv[optind], BWA_IDX_ALL)) == 0) return 1; // FIXME: memory leak
+	}
+	// if ((idx = bwa_idx_load(argv[optind], BWA_IDX_BWT|BWA_IDX_BNS)) == 0) return 1;
 	itr = smem_itr_init(idx->bwt);
 	smem_config(itr, min_intv, max_len, max_intv);
 	while (kseq_read(seq) >= 0) {
