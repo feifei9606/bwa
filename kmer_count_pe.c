@@ -141,9 +141,17 @@ static void* worker_func(void *arg)
 	uint64_t local_multi  = 0;
 	uint64_t local_zero   = 0;
 
+	int name1_cap = 0, name2_cap = 0;
+	int seq1_cap = 0, seq2_cap = 0;
+	int q1_cap = 0, q2_cap = 0;
+	char *name1 = NULL, *name2 = NULL;
+	char *seq_str1 = NULL, *seq_str2 = NULL;
+	uint8_t *q1 = NULL, *q2 = NULL;
+
+	char out_buf[65536];
+	int out_len = 0;
+
 	while (1) {
-		char *name1 = NULL, *name2 = NULL;
-		char *seq_str1 = NULL, *seq_str2 = NULL;
 		int len1 = 0, len2 = 0;
 		uint64_t pair_idx = 0;
 
@@ -153,41 +161,79 @@ static void* worker_func(void *arg)
 		if (s->interleaved) {
 			int ret1 = kseq_read(s->seq1);
 			if (ret1 < 0) { pthread_mutex_unlock(s->read_lock); break; }
-			name1 = strdup(s->seq1->name.s);
-			seq_str1 = strdup(s->seq1->seq.s);
+			if (s->seq1->name.l + 1 > name1_cap) {
+				name1_cap = s->seq1->name.l + 1;
+				name1 = realloc(name1, name1_cap);
+				if (!name1) { perror("realloc"); exit(1); }
+			}
+			memcpy(name1, s->seq1->name.s, s->seq1->name.l + 1);
+			if (s->seq1->seq.l + 1 > seq1_cap) {
+				seq1_cap = s->seq1->seq.l + 1;
+				seq_str1 = realloc(seq_str1, seq1_cap);
+				if (!seq_str1) { perror("realloc"); exit(1); }
+			}
+			memcpy(seq_str1, s->seq1->seq.s, s->seq1->seq.l + 1);
 			len1 = s->seq1->seq.l;
 
 			int ret2 = kseq_read(s->seq1);
 			if (ret2 < 0) {
-				free(name1); free(seq_str1);
 				pthread_mutex_unlock(s->read_lock);
 				break;
 			}
-			name2 = strdup(s->seq1->name.s);
-			seq_str2 = strdup(s->seq1->seq.s);
+			if (s->seq1->name.l + 1 > name2_cap) {
+				name2_cap = s->seq1->name.l + 1;
+				name2 = realloc(name2, name2_cap);
+				if (!name2) { perror("realloc"); exit(1); }
+			}
+			memcpy(name2, s->seq1->name.s, s->seq1->name.l + 1);
+			if (s->seq1->seq.l + 1 > seq2_cap) {
+				seq2_cap = s->seq1->seq.l + 1;
+				seq_str2 = realloc(seq_str2, seq2_cap);
+				if (!seq_str2) { perror("realloc"); exit(1); }
+			}
+			memcpy(seq_str2, s->seq1->seq.s, s->seq1->seq.l + 1);
 			len2 = s->seq1->seq.l;
 			pair_idx = ++s->pair_counter;
 		} else {
 			int ret1 = kseq_read(s->seq1);
 			int ret2 = kseq_read(s->seq2);
 			if (ret1 < 0 || ret2 < 0) { pthread_mutex_unlock(s->read_lock); break; }
-			name1 = strdup(s->seq1->name.s);
-			seq_str1 = strdup(s->seq1->seq.s);
+			if (s->seq1->name.l + 1 > name1_cap) {
+				name1_cap = s->seq1->name.l + 1;
+				name1 = realloc(name1, name1_cap);
+				if (!name1) { perror("realloc"); exit(1); }
+			}
+			memcpy(name1, s->seq1->name.s, s->seq1->name.l + 1);
+			if (s->seq1->seq.l + 1 > seq1_cap) {
+				seq1_cap = s->seq1->seq.l + 1;
+				seq_str1 = realloc(seq_str1, seq1_cap);
+				if (!seq_str1) { perror("realloc"); exit(1); }
+			}
+			memcpy(seq_str1, s->seq1->seq.s, s->seq1->seq.l + 1);
 			len1 = s->seq1->seq.l;
-			name2 = strdup(s->seq2->name.s);
-			seq_str2 = strdup(s->seq2->seq.s);
+			if (s->seq2->name.l + 1 > name2_cap) {
+				name2_cap = s->seq2->name.l + 1;
+				name2 = realloc(name2, name2_cap);
+				if (!name2) { perror("realloc"); exit(1); }
+			}
+			memcpy(name2, s->seq2->name.s, s->seq2->name.l + 1);
+			if (s->seq2->seq.l + 1 > seq2_cap) {
+				seq2_cap = s->seq2->seq.l + 1;
+				seq_str2 = realloc(seq_str2, seq2_cap);
+				if (!seq_str2) { perror("realloc"); exit(1); }
+			}
+			memcpy(seq_str2, s->seq2->seq.s, s->seq2->seq.l + 1);
 			len2 = s->seq2->seq.l;
 			pair_idx = ++s->pair_counter;
-		}
-
-		if (!name1 || !seq_str1 || !name2 || !seq_str2) {
-			perror("strdup"); exit(1);
 		}
 		pthread_mutex_unlock(s->read_lock);
 
 		/* 2. 编码 read 1 */
-		uint8_t *q1 = (uint8_t*)malloc(len1);
-		if (!q1) { perror("malloc"); exit(1); }
+		if (len1 > q1_cap) {
+			q1_cap = len1;
+			q1 = realloc(q1, q1_cap);
+			if (!q1) { perror("realloc"); exit(1); }
+		}
 		int bad1 = 0, gc1 = 0;
 		for (int i = 0; i < len1; ++i) {
 			q1[i] = nst_nt4_table[(int)seq_str1[i]];
@@ -198,8 +244,11 @@ static void* worker_func(void *arg)
 		int ret_match1 = bad1 ? 0 : bwt_match_exact(s->idx->bwt, len1, q1, &k1, &l1);
 
 		/* 3. 编码 read 2 */
-		uint8_t *q2 = (uint8_t*)malloc(len2);
-		if (!q2) { perror("malloc"); exit(1); }
+		if (len2 > q2_cap) {
+			q2_cap = len2;
+			q2 = realloc(q2, q2_cap);
+			if (!q2) { perror("realloc"); exit(1); }
+		}
 		int bad2 = 0, gc2 = 0;
 		for (int i = 0; i < len2; ++i) {
 			q2[i] = nst_nt4_table[(int)seq_str2[i]];
@@ -226,10 +275,9 @@ static void* worker_func(void *arg)
 		                      MAX_POS_PER_READ);
 
 		if (n1 > 0 || n2 > 0) {
-			/* 至少一个 read 有有效命中 */
 			local_unique++;
 
-			int c1 = (n1 > 0) ? n1 : 1;  /* 如果无命中，用1个占位行 */
+			int c1 = (n1 > 0) ? n1 : 1;
 			int c2 = (n2 > 0) ? n2 : 1;
 
 			int total_lines = 0;
@@ -237,7 +285,6 @@ static void* worker_func(void *arg)
 				for (int j = 0; j < c2 && total_lines < MAX_COMBINATIONS; j++) {
 					total_lines++;
 
-					/* Read 1 字段 */
 					char *out_chr1 = NULL;
 					long long out_pos1 = 0;
 					char out_strand1 = 0;
@@ -249,7 +296,6 @@ static void* worker_func(void *arg)
 						out_chr1 = "0"; out_pos1 = 0; out_strand1 = '0';
 					}
 
-					/* Read 2 字段 */
 					char *out_chr2 = NULL;
 					long long out_pos2 = 0;
 					char out_strand2 = 0;
@@ -261,36 +307,36 @@ static void* worker_func(void *arg)
 						out_chr2 = "0"; out_pos2 = 0; out_strand2 = '0';
 					}
 
-					pthread_mutex_lock(s->print_lock);
-					printf("%llu\t%s\t%lld\t%d\t%c\t%s\t%lld\t%d\t%c\n",
+					if (out_len + 256 > (int)sizeof(out_buf)) {
+						pthread_mutex_lock(s->print_lock);
+						fwrite(out_buf, 1, out_len, stdout);
+						pthread_mutex_unlock(s->print_lock);
+						out_len = 0;
+					}
+					out_len += snprintf(out_buf + out_len, sizeof(out_buf) - out_len,
+					       "%llu\t%s\t%lld\t%d\t%c\t%s\t%lld\t%d\t%c\n",
 					       (unsigned long long)pair_idx,
 					       out_chr1, out_pos1, (n1 > 0 ? gc1 : 0), out_strand1,
 					       out_chr2, out_pos2, (n2 > 0 ? gc2 : 0), out_strand2);
-					fflush(stdout);
-					pthread_mutex_unlock(s->print_lock);
 				}
 			}
 
 		} else if (n1 == 0 || n2 == 0) {
-			/* 至少一个零匹配 */
 			local_zero++;
 		} else {
-			/* 两者都是多匹配且不在 AZF 内 (n1<0 且 n2<0) */
 			local_multi++;
 		}
-
-		/* 释放从 collect_hits 分配的内存 (通过 idx->bns->anns 字段无需释放) */
-		if (n1 > 0) {
-			/* hit1_chrs 指向 bns->anns[].name，无需 free */
-		}
-		if (n2 > 0) {
-			/* 同上 */
-		}
-
-		free(q1); free(q2);
-		free(name1); free(name2);
-		free(seq_str1); free(seq_str2);
 	}
+
+	if (out_len > 0) {
+		pthread_mutex_lock(s->print_lock);
+		fwrite(out_buf, 1, out_len, stdout);
+		pthread_mutex_unlock(s->print_lock);
+	}
+
+	free(name1); free(name2);
+	free(seq_str1); free(seq_str2);
+	free(q1); free(q2);
 
 	pthread_mutex_lock(s->count_lock);
 	s->unique += local_unique;
@@ -424,6 +470,8 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < n_threads; ++i) {
 		pthread_join(threads[i], NULL);
 	}
+
+	fflush(stdout);
 
 	uint64_t total = shared.unique + shared.multi + shared.zero;
 	fprintf(stderr, "TOTAL_READS\t%llu\n", (unsigned long long)total);

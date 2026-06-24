@@ -32,12 +32,10 @@ typedef struct {
 	chain_file_t *chain;          // liftover chain (可为NULL)
 } shared_t;
 
-/*
- * 输出一行结果 (对唯一匹配或多匹配AZF区域都适用)
- * 如果 chain 存在，先尝试 liftover；失败则用回原始坐标
- */
-static void output_line(shared_t *s, uint64_t seq_idx,
-                        char *orig_chr, long long orig_pos, int gc_count, char orig_strand)
+/* Format one output line into the thread's batch buffer */
+static void format_line(shared_t *s, uint64_t seq_idx,
+                        char *orig_chr, long long orig_pos, int gc_count, char orig_strand,
+                        char *out_buf, int *out_len)
 {
 	char *out_chr = orig_chr;
 	long long out_pos = orig_pos;
@@ -47,28 +45,25 @@ static void output_line(shared_t *s, uint64_t seq_idx,
 		char *q_chr = NULL;
 		int64_t q_pos = 0;
 		char q_strand = 0;
-		/* 0-based position for chain_liftover */
 		if (chain_liftover(s->chain, orig_chr, orig_pos - 1, &q_chr, &q_pos, &q_strand)) {
 			out_chr = q_chr;
-			out_pos = q_pos + 1; /* back to 1-based */
+			out_pos = q_pos + 1;
 			out_strand = q_strand;
 		} else {
-			/* liftover 失败：输出 0 */
-			out_chr = "0";
-			out_pos = 0;
-			out_strand = '0';
+			out_chr = "0"; out_pos = 0; out_strand = '0';
 		}
 	}
 
-	pthread_mutex_lock(s->print_lock);
-	printf("%llu\t%s\t%lld\t%d\t%c\n",
+	if (*out_len + 256 > (int)65536) {
+		pthread_mutex_lock(s->print_lock);
+		fwrite(out_buf, 1, *out_len, stdout);
+		pthread_mutex_unlock(s->print_lock);
+		*out_len = 0;
+	}
+	*out_len += snprintf(out_buf + *out_len, 65536 - *out_len,
+	       "%llu\t%s\t%lld\t%d\t%c\n",
 	       (unsigned long long)seq_idx,
-	       out_chr,
-	       out_pos,
-	       gc_count,
-	       out_strand);
-	fflush(stdout);
-	pthread_mutex_unlock(s->print_lock);
+	       out_chr, out_pos, gc_count, out_strand);
 }
 
 static void* worker_func(void *arg)
@@ -79,8 +74,14 @@ static void* worker_func(void *arg)
 	uint64_t local_multi  = 0;
 	uint64_t local_zero   = 0;
 
+	int name_cap = 0, seq_cap = 0, q_cap = 0;
+	char *name = NULL, *seq_str = NULL;
+	uint8_t *q = NULL;
+
+	char out_buf[65536];
+	int out_len = 0;
+
 	while (1) {
-		// 1. 锁定读取一条序列
 		pthread_mutex_lock(s->read_lock);
 		if (kseq_read(s->seq) < 0) {
 			pthread_mutex_unlock(s->read_lock);
@@ -88,19 +89,26 @@ static void* worker_func(void *arg)
 		}
 
 		int len = s->seq->seq.l;
-		char *name = strdup(s->seq->name.s);
-		char *seq_str = strdup(s->seq->seq.s);
+		if (s->seq->name.l + 1 > name_cap) {
+			name_cap = s->seq->name.l + 1;
+			name = realloc(name, name_cap);
+			if (!name) { perror("realloc"); exit(1); }
+		}
+		memcpy(name, s->seq->name.s, s->seq->name.l + 1);
+		if (s->seq->seq.l + 1 > seq_cap) {
+			seq_cap = s->seq->seq.l + 1;
+			seq_str = realloc(seq_str, seq_cap);
+			if (!seq_str) { perror("realloc"); exit(1); }
+		}
+		memcpy(seq_str, s->seq->seq.s, s->seq->seq.l + 1);
 		uint64_t seq_idx = ++s->seq_counter;
 		pthread_mutex_unlock(s->read_lock);
 
-		if (!name || !seq_str) {
-			perror("strdup");
-			exit(1);
+		if (len > q_cap) {
+			q_cap = len;
+			q = realloc(q, q_cap);
+			if (!q) { perror("realloc"); exit(1); }
 		}
-
-		// 2. 编码序列
-		uint8_t *q = (uint8_t*)malloc(len);
-		if (!q) { perror("malloc"); exit(1); }
 
 		int bad = 0;
 		int gc_count = 0;
@@ -112,7 +120,6 @@ static void* worker_func(void *arg)
 
 		if (bad) {
 			local_zero++;
-			free(q); free(name); free(seq_str);
 			continue;
 		}
 
@@ -120,30 +127,27 @@ static void* worker_func(void *arg)
 		int ret = bwt_match_exact(s->idx->bwt, len, q, &k, &l);
 
 		if (ret == 1) {
-			// 唯一匹配
 			bwtint_t sa_pos = bwt_sa(s->idx->bwt, k);
 			char *chr = NULL;
 			long long pos = 0;
 			char strand = 0;
 			bwa_pos2coord(s->idx, sa_pos, len, &chr, &pos, &strand);
-			output_line(s, seq_idx, chr, pos, gc_count, strand);
+			format_line(s, seq_idx, chr, pos, gc_count, strand, out_buf, &out_len);
 			local_unique++;
 
 		} else if (ret > 1 && s->azf) {
-			// 多匹配 + AZF 模式: 检查是否全部命中都在 AZF 区域
 			bwtint_t n_hits = l - k + 1;
 			if (n_hits > MAX_MULTI_ENUM) {
 				local_multi++;
-				free(q); free(name); free(seq_str);
 				continue;
 			}
 
-			int all_in_azf = 1;
 			bwtint_t *sa_positions = malloc(n_hits * sizeof(bwtint_t));
 			char   **chrs   = malloc(n_hits * sizeof(char*));
 			long long *positions = malloc(n_hits * sizeof(long long));
 			char    *strands = n_hits ? malloc(n_hits * sizeof(char)) : NULL;
 
+			int all_in_azf = 1;
 			for (bwtint_t i = 0; i < n_hits; i++) {
 				bwtint_t sa_p = bwt_sa(s->idx->bwt, k + i);
 				sa_positions[i] = sa_p;
@@ -154,37 +158,36 @@ static void* worker_func(void *arg)
 				chrs[i] = chr;
 				positions[i] = pos;
 				strands[i] = strand;
-
-				if (!bed_query(s->azf, chr, pos - 1)) {
+				if (!bed_query(s->azf, chr, pos - 1))
 					all_in_azf = 0;
-				}
 			}
 
 			if (all_in_azf) {
-				for (bwtint_t i = 0; i < n_hits; i++) {
-					output_line(s, seq_idx, chrs[i], positions[i], gc_count, strands[i]);
-				}
+				for (bwtint_t i = 0; i < n_hits; i++)
+					format_line(s, seq_idx, chrs[i], positions[i], gc_count, strands[i],
+					            out_buf, &out_len);
 				local_unique++;
 			} else {
 				local_multi++;
 			}
 
-			free(sa_positions);
-			free(positions);
-			free(strands);
-			free(chrs);
+			free(sa_positions); free(positions);
+			free(strands); free(chrs);
 
 		} else if (ret > 1) {
-			// 普通多匹配（无 AZF）
 			local_multi++;
 		} else {
 			local_zero++;
 		}
-
-		free(q);
-		free(name);
-		free(seq_str);
 	}
+
+	if (out_len > 0) {
+		pthread_mutex_lock(s->print_lock);
+		fwrite(out_buf, 1, out_len, stdout);
+		pthread_mutex_unlock(s->print_lock);
+	}
+
+	free(name); free(seq_str); free(q);
 
 	pthread_mutex_lock(s->count_lock);
 	s->unique += local_unique;
@@ -298,6 +301,8 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < n_threads; ++i) {
 		pthread_join(threads[i], NULL);
 	}
+
+	fflush(stdout);
 
 	uint64_t total = shared.unique + shared.multi + shared.zero;
 	fprintf(stderr, "TOTAL\t%llu\nUNIQUE\t%llu\nMULTI\t%llu\nZERO\t%llu\n",
